@@ -1,175 +1,399 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-
-const EVENT_HORIZON = 6.0;
-const BEAM_DIR = Math.PI * 0.95;
-
-const noiseShader = `
-    vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-    vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-    vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
-    vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
-
-    float snoise(vec3 v) {
-        const vec2  C = vec2(1.0/6.0, 1.0/3.0);
-        const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
-
-        vec3 i  = floor(v + dot(v, C.yyy));
-        vec3 x0 = v - i + dot(i, C.xxx);
-
-        vec3 g = step(x0.yzx, x0.xyz);
-        vec3 l = 1.0 - g;
-        vec3 i1 = min(g.xyz, l.zxy);
-        vec3 i2 = max(g.xyz, l.zxy);
-
-        vec3 x1 = x0 - i1 + C.xxx;
-        vec3 x2 = x0 - i2 + C.yyy;
-        vec3 x3 = x0 - D.yyy;
-
-        i = mod289(i);
-        vec4 p = permute(permute(permute(i.z + vec4(0.0, i1.z, i2.z, 1.0)) + i.y + vec4(0.0, i1.y, i2.y, 1.0)) + i.x + vec4(0.0, i1.x, i2.x, 1.0));
-        float n_ = 0.142857142857;
-        vec3 ns = n_ * D.wyz - D.xzx;
-
-        vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-        vec4 x_ = floor(j * ns.z);
-        vec4 y_ = floor(j - 7.0 * x_);
-        vec4 x = x_ * ns.x + ns.yyyy;
-        vec4 y = y_ * ns.x + ns.yyyy;
-        vec4 h = 1.0 - abs(x) - abs(y);
-
-        vec4 b0 = vec4(x.xy, y.xy);
-        vec4 b1 = vec4(x.zw, y.zw);
-
-        vec4 s0 = floor(b0)*2.0 + 1.0;
-        vec4 s1 = floor(b1)*2.0 + 1.0;
-        vec4 sh = -step(h, vec4(0.0));
-
-        vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
-        vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
-
-        vec3 p0 = vec3(a0.xy, h.x);
-        vec3 p1 = vec3(a0.zw, h.y);
-        vec3 p2 = vec3(a1.xy, h.z);
-        vec3 p3 = vec3(a1.zw, h.w);
-
-        vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
-        p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
-
-        vec4 m = max(0.5 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-        m = m * m;
-        return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
-    }
-`;
-
-const GravitationalLensingShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    uMass: { value: 0.1 },
-    uAspect: { value: window.innerWidth / window.innerHeight },
-  },
-  vertexShader: `
-        varying vec2 vUv;
-        void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-    `,
-  fragmentShader: `
-        uniform sampler2D tDiffuse;
-        uniform float uMass;
-        uniform float uAspect;
-        varying vec2 vUv;
-
-        void main() {
-            vec2 uv = vUv - 0.5;
-            uv.x *= uAspect;
-
-            float dist = length(uv);
-            vec2 dirNorm = dist > 0.0001 ? uv / dist : vec2(0.0);
-            float distortion = (uMass * uMass) / max(dist, 0.01);
-            distortion *= smoothstep(0.01, 0.08, dist);
-            vec2 offset = dirNorm * distortion;
-            vec2 lensedUv = uv - offset;
-            lensedUv.x /= uAspect;
-            lensedUv += 0.5;
-            vec4 col = texture2D(tDiffuse, lensedUv);
-            gl_FragColor = col;
-        }
-    `,
-};
 
 const globalStyles = `
-  html, body, #root {
+  html, body {
     margin: 0;
+    padding: 0;
     width: 100%;
     height: 100%;
     overflow: hidden;
-    background-color: #000000;
-    font-family: 'Inter', sans-serif;
+    background: #000;
+    user-select: none;
+    -webkit-user-select: none;
   }
-
-  body {
+  .canvas-container {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: #000;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    touch-action: none;
     cursor: grab;
   }
-
-  body:active {
+  canvas:active {
     cursor: grabbing;
   }
+`;
 
-  .app-shell,
-  .scene-root {
-    width: 100%;
-    height: 100%;
+const vertexShader = /* glsl */ `
+  void main() {
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`;
+
+const fragmentShader = /* glsl */ `
+  precision highp float;
+
+  #define PI 3.14159265359
+  #define MAX_STEPS 160
+
+  uniform vec2  iResolution;
+  uniform float iTime;
+  uniform vec3  camPos;
+  uniform vec3  camRight;
+  uniform vec3  camUp;
+  uniform vec3  camForward;
+  uniform float camFov;
+  uniform float uRs;
+  uniform float uDiskInner;
+  uniform float uDiskOuter;
+  uniform float uDiskRotSpeed;
+  uniform float uDiskSpin;
+  uniform float uExposure;
+  uniform float uAxisTilt;
+  uniform float uCameraRoll;
+  uniform vec3  uTravel;
+
+  // ---- Hash y Ruido 3D Ultra-Optimizado -------------------------------------
+  float hash13(vec3 p3) {
+      p3 = fract(p3 * 0.1031);
+      p3 += dot(p3, p3.zyx + 31.32);
+      return fract((p3.x + p3.y) * p3.z);
   }
 
-  .scene-root {
-    position: relative;
-    overflow: hidden;
+  float noise3(vec3 p) {
+      vec3 i = floor(p);
+      vec3 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+
+      float n000 = hash13(i + vec3(0.0, 0.0, 0.0));
+      float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+      float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+      float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+      float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+      float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+      float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+      float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+
+      float x00 = mix(n000, n100, f.x);
+      float x10 = mix(n010, n110, f.x);
+      float x01 = mix(n001, n101, f.x);
+      float x11 = mix(n011, n111, f.x);
+
+      float y0 = mix(x00, x10, f.y);
+      float y1 = mix(x01, x11, f.y);
+
+      return mix(y0, y1, f.z);
   }
 
-  .scene-root canvas {
-    display: block;
-    width: 100%;
-    height: 100%;
+  float fbm(vec3 p) {
+      float v = 0.55 * noise3(p);
+      v += 0.30 * noise3(p * 2.04 + vec3(11.7, 3.1, 7.9));
+      v += 0.15 * noise3(p * 4.08 + vec3(23.4, 6.2, 15.8));
+      return v;
   }
 
-  .loading {
-    position: absolute;
-    inset: 0;
-    background-color: #000;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    color: #ff8833;
-    font-family: monospace;
-    font-size: 1.2rem;
-    z-index: 100;
-    transition: opacity 1.5s ease;
-    pointer-events: none;
-    letter-spacing: 2px;
+  float fbmFlow(vec3 p, float lac) {
+      float v = 0.60 * noise3(p);
+      v += 0.28 * noise3(p * lac + vec3(5.3, 9.1, 2.7));
+      v += 0.12 * noise3(p * (lac * 2.0) + vec3(12.1, 4.3, 8.9));
+      return v;
   }
 
-  .spinner {
-    width: 40px;
-    height: 40px;
-    border: 2px solid transparent;
-    border-top-color: #ff8833;
-    border-bottom-color: #ff8833;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    margin-bottom: 20px;
+  // ---- Fondo HD: Estrellas Nítidas y Nebulosas Cósmicas ---------------------
+  vec3 starfield(vec3 dir, vec3 travel) {
+      vec3 col = vec3(0.0);
+      for (int layer = 0; layer < 2; layer++) {
+          float scale = 65.0 + float(layer) * 45.0;
+          vec3 p = dir * scale + travel * (0.35 + float(layer) * 0.45);
+          vec3 cell = floor(p);
+          vec3 f = fract(p);
+
+          float h = hash13(cell + float(layer) * 17.0);
+          if (h > 0.962) {
+              vec3 c = vec3(
+                  0.2 + 0.6 * hash13(cell + 1.7),
+                  0.2 + 0.6 * hash13(cell + 5.3),
+                  0.2 + 0.6 * hash13(cell + 9.1)
+              );
+              float d = length(f - c);
+              float s = smoothstep(0.10, 0.0, d);
+              float temp = hash13(cell + 3.3);
+              vec3 tint = mix(vec3(0.75, 0.88, 1.0), vec3(1.0, 0.92, 0.85), temp);
+              col += tint * s * (0.8 + 1.6 * hash13(cell + 21.0));
+          }
+      }
+      return col;
   }
 
-  @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+  vec3 bigStars(vec3 dir, vec3 travel) {
+      vec3 p = dir * 20.0 + travel * 0.10;
+      vec3 cell = floor(p);
+      vec3 f = fract(p);
+
+      float h = hash13(cell + 41.0);
+      if (h < 0.94) return vec3(0.0);
+
+      vec3 c = vec3(
+          0.25 + 0.5 * hash13(cell + 2.2),
+          0.25 + 0.5 * hash13(cell + 6.6),
+          0.25 + 0.5 * hash13(cell + 10.4)
+      );
+      float d = length(f - c);
+      float core = smoothstep(0.065, 0.0, d);
+      float glow = exp(-d * 16.0) * 0.4;
+      float temp = hash13(cell + 8.8);
+      vec3 tint = mix(vec3(0.8, 0.92, 1.0), vec3(1.0, 0.95, 0.88), temp);
+      return tint * (core * 2.6 + glow) * (0.7 + 0.8 * hash13(cell + 30.0));
+  }
+
+  vec3 nebulaClouds(vec3 dir, vec3 travel) {
+      float n1 = fbm(dir * 2.0 + travel * 0.02 + vec3(3.0, 1.0, 7.0));
+      float n2 = fbm(dir * 4.2 + travel * 0.035 + vec3(9.0, 4.0, 2.0));
+      float m = smoothstep(0.40, 0.85, n1 * 0.65 + n2 * 0.35);
+
+      // Colores de nebulosa idénticos a la referencia: morados oscuros y azulados
+      vec3 colA = vec3(0.12, 0.05, 0.22); // Púrpura interestelar
+      vec3 colB = vec3(0.03, 0.09, 0.20); // Azul espacial profundo
+      vec3 colC = vec3(0.07, 0.02, 0.15); // Violeta tenue
+      vec3 neb = mix(colA, colB, n2);
+      neb = mix(neb, colC, smoothstep(0.5, 0.9, n1) * 0.5);
+      return neb * m * 0.65;
+  }
+
+  // ---- Paleta de Azul Cósmico Brillante (Gargantua Azul) -------------------
+  vec3 diskRamp(float t) {
+      // Centro incandescente blanco-azulado (como en la imagen de referencia)
+      vec3 whiteCore = vec3(0.88, 0.96, 1.00) * 3.6;
+      vec3 skyBlue   = vec3(0.35, 0.82, 1.00) * 3.0;
+      vec3 midBlue   = vec3(0.10, 0.55, 1.00) * 2.6;
+      vec3 deepBlue  = vec3(0.03, 0.25, 0.92) * 2.1;
+      vec3 navy      = vec3(0.01, 0.08, 0.48) * 1.4;
+      vec3 darkEdge  = vec3(0.005, 0.02, 0.18) * 0.6;
+
+      vec3 c = mix(whiteCore, skyBlue, smoothstep(-0.02, 0.15, t));
+      c = mix(c, midBlue, smoothstep(0.10, 0.42, t));
+      c = mix(c, deepBlue, smoothstep(0.35, 0.68, t));
+      c = mix(c, navy, smoothstep(0.55, 0.88, t));
+      c = mix(c, darkEdge, smoothstep(0.75, 1.05, t));
+      c = mix(c, vec3(0.0), smoothstep(0.98, 1.25, t));
+      return c;
+  }
+
+  // ---- Estrellitas / Partículas: POCAS Y JUSTO AL TERMINAR LA PARTE AZUL ---
+  float boundaryParticles(float r, float phi, float innerR, float outerR, float time) {
+      float t = (r - innerR) / (outerR - innerR);
+
+      // Estrictamente al terminar la parte azul (borde exterior sutil)
+      if (t < 0.88 || t > 1.08) return 0.0;
+
+      // Franja muy fina y suave justo donde el azul se funde con el espacio
+      float edgeMask = smoothstep(0.88, 0.94, t) * (1.0 - smoothstep(1.02, 1.08, t));
+
+      float rRatio = max(r, innerR * 0.7) / innerR;
+      float omega = 1.15 / (rRatio * sqrt(rRatio));
+      float rotAngle = phi - omega * (7.0 + time * 1.4) * uDiskRotSpeed * uDiskSpin;
+
+      // Celdas más espaciadas para que sean POCAS y esparcidas naturalmente
+      float radialScale = 7.0;
+      float angularBins = floor(r * 10.0);
+
+      float rCell = floor(r * radialScale);
+      float rFract = fract(r * radialScale);
+
+      float aCoord = (rotAngle / (2.0 * PI) + 0.5) * angularBins;
+      float aCell = floor(aCoord);
+      float aFract = fract(aCoord);
+
+      vec3 seed = vec3(rCell, mod(aCell, max(angularBins, 1.0)), 19.3);
+      float prob = hash13(seed);
+
+      float pAccum = 0.0;
+      // Umbral alto (0.91): solo aparecen pocas motas de polvo estelar aisladas
+      if (prob > 0.91) {
+          vec2 center = vec2(0.3 + 0.4 * hash13(seed + 4.1), 0.3 + 0.4 * hash13(seed + 8.7));
+          vec2 d = vec2((rFract - center.x) * 1.5, (aFract - center.y) * 0.9);
+          float dist = length(d);
+          float size = 0.12 + 0.14 * hash13(seed + 13.5);
+          float spark = smoothstep(size, 0.0, dist);
+          float twinkle = 0.6 + 0.4 * sin(time * (4.0 + prob * 5.0) + prob * 35.0);
+          pAccum = spark * twinkle * (0.7 + 0.6 * prob);
+      }
+
+      return pAccum * edgeMask;
+  }
+
+  // ---- Disco de Acreción de Gargantua --------------------------------------
+  vec4 evaluateDiskAndClouds(vec3 p, vec3 rayDir, float innerR, float outerR, float time) {
+      float r = length(p.xz);
+      float t = (r - innerR) / (outerR - innerR);
+      if (t < -0.06 || t > 1.25) return vec4(0.0);
+
+      float phi = atan(p.z, p.x);
+
+      float rRatio = max(r, innerR * 0.75) / innerR;
+      float omega = 1.15 / (rRatio * sqrt(rRatio));
+      float windTime = 6.0 + time * 1.2;
+      float swirl = phi - omega * windTime * uDiskRotSpeed * uDiskSpin;
+
+      vec2 flowXY = vec2(cos(swirl), sin(swirl)) * r;
+      vec3 flowP = vec3(flowXY.x * 0.22, flowXY.y * 0.22, r * 0.05 - time * 0.06);
+
+      float nFilaments = clamp(fbmFlow(flowP, 2.6), 0.0, 1.0);
+      float grooveWave1 = sin(r * 4.2 + nFilaments * 2.0) * 0.5 + 0.5;
+      float grooveWave2 = sin(r * 11.0 + nFilaments * 1.5) * 0.5 + 0.5;
+      float concentricRings = mix(0.70, 1.25, smoothstep(0.1, 0.9, grooveWave1 * 0.6 + grooveWave2 * 0.4));
+
+      float cloudSwirl = phi - omega * (3.0 + time * 1.0) * uDiskRotSpeed * uDiskSpin;
+      vec2 cloudXY = vec2(cos(cloudSwirl), sin(cloudSwirl)) * r;
+      float cloudBillows = fbm(vec3(cloudXY * 0.45, r * 0.16 + time * 0.08));
+      float cloudStructure = smoothstep(0.24, 0.8, cloudBillows);
+
+      float lanes = noise3(vec3(flowXY.x * 0.5, flowXY.y * 0.5, time * 0.08));
+      float dustLane = smoothstep(0.18, 0.78, lanes);
+
+      // Zona interior brillante
+      float yOmega = omega * 1.7;
+      float ySwirl = phi - yOmega * (3.0 + time * 1.2) * uDiskRotSpeed * uDiskSpin;
+      vec2 yXY = vec2(cos(ySwirl), sin(ySwirl)) * r;
+      float yPat = fbm(vec3(yXY * 0.35, time * 0.05));
+      float coreZone = 1.0 - smoothstep(0.0, 0.50, t);
+      float tShift = (0.5 - yPat) * 0.22 * coreZone;
+
+      vec3 baseColor = diskRamp(t + tShift + (nFilaments - 0.5) * 0.11 - (concentricRings - 0.9) * 0.03);
+
+      float edgeNoise = noise3(vec3(cos(phi) * 2.2, sin(phi) * 2.2, time * 0.03));
+      float outerEdge = 0.92 + edgeNoise * 0.35;
+      float innerCloudEdge = smoothstep(-0.06, 0.04, t + (cloudStructure - 0.5) * 0.04);
+      float radialMask = innerCloudEdge * (1.0 - smoothstep(0.55, outerEdge, t));
+
+      float spiral = 0.75 + 0.25 * sin(3.0 * swirl + r * 0.55) + 0.14 * sin(5.0 * swirl - r * 0.9);
+      float density = radialMask * (0.65 + 0.45 * nFilaments) * concentricRings * mix(0.65, 1.1, dustLane) * spiral;
+
+      vec3 tangent = normalize(vec3(-p.z, 0.0, p.x)) * uDiskSpin;
+      float vOrb = clamp(sqrt(uRs / (2.0 * max(r, uRs))), 0.0, 0.95);
+      float mu = dot(tangent, -rayDir);
+      float dopplerFactor = 1.0 / max(0.16, (1.0 - vOrb * mu));
+      float beaming = dopplerFactor * dopplerFactor;
+
+      vec3 col = baseColor * density * beaming * (1.0 + 0.25 * (yPat - 0.5) * coreZone);
+
+      // Partículas sutiles justo en el término del disco azul
+      float particles = boundaryParticles(r, phi, innerR, outerR, time);
+      vec3 particleCol = vec3(0.35, 0.72, 1.0) * beaming * 1.2;
+      col += particleCol * particles;
+
+      col.b *= clamp(dopplerFactor, 0.6, 1.6);
+      col.r *= clamp(2.0 - dopplerFactor, 0.5, 1.3);
+
+      col = col / (1.0 + 0.55 * col);
+
+      float alpha = clamp(max(max(col.r, col.g), col.b) * 0.85 + particles * 0.5, 0.0, 0.98);
+      return vec4(max(col, 0.0), alpha);
+  }
+
+  vec3 acesFilm(vec3 x) {
+      const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+      return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+  }
+
+  vec3 rotateX(vec3 v, float a) {
+      float c = cos(a), s = sin(a);
+      return vec3(v.x, v.y * c - v.z * s, v.y * s + v.z * c);
+  }
+
+  // ---- Raymarching Geodésico Ultra-Rápido -----------------------------------
+  vec3 traceRay(vec3 ro, vec3 rd) {
+      vec3 pos = rotateX(ro, -uAxisTilt);
+      vec3 dir = rotateX(rd, -uAxisTilt);
+      vec3 h = cross(pos, dir);
+      float h2 = dot(h, h);
+
+      float escapeR = uRs * 190.0;
+      bool hitHorizon = false;
+      float lensR = uDiskOuter * 0.5;
+
+      float photonR = uRs * 2.1;
+      float ringWidth = uRs * 0.08;
+      float minR = escapeR;
+
+      vec3 accumColor = vec3(0.0);
+      float accumAlpha = 0.0;
+
+      for (int i = 0; i < MAX_STEPS; i++) {
+          float r = length(pos);
+          minR = min(minR, r);
+
+          if (r < uRs * 1.02) { hitHorizon = true; break; }
+
+          // Optimización de escape: si el rayo se aleja del agujero y ya salió de la zona gravitatoria activa
+          if ((r > uDiskOuter * 1.35 && dot(pos, dir) > 0.0) || r > escapeR || accumAlpha > 0.98) {
+              break;
+          }
+
+          float dt = clamp(r * 0.16, 0.035, 1.9);
+
+          // Atenuación y aceleración gravitatoria optimizada sin pow()
+          float rl = r / lensR;
+          float rl2 = rl * rl;
+          float rl4 = rl2 * rl2;
+          float atten = 1.0 / (1.0 + rl4 * rl4);
+
+          float r2 = r * r;
+          vec3 accel = (-1.5 * uRs * h2 * atten / (r2 * r2 * r)) * pos;
+          vec3 newDir = normalize(dir + accel * dt);
+          vec3 newPos = pos + newDir * dt;
+
+          // Detección de cruce del plano ecuatorial del disco
+          if (sign(pos.y) != sign(newPos.y)) {
+              float tc = pos.y / (pos.y - newPos.y);
+              vec3 hitP = mix(pos, newPos, tc);
+              float rHit = length(hitP.xz);
+              if (rHit > uDiskInner * 0.8 && rHit < uDiskOuter * 1.25) {
+                  vec4 diskSample = evaluateDiskAndClouds(hitP, newDir, uDiskInner, uDiskOuter, iTime);
+                  accumColor += (1.0 - accumAlpha) * diskSample.rgb;
+                  accumAlpha += (1.0 - accumAlpha) * diskSample.a;
+              }
+          }
+
+          pos = newPos;
+          dir = newDir;
+      }
+
+      // Fondo galáctico nítido en HD
+      vec3 bg = hitHorizon ? vec3(0.0) : (starfield(dir, uTravel) + bigStars(dir, uTravel) + nebulaClouds(dir, uTravel));
+
+      // Resplandor del anillo de fotones
+      float diff = (minR - photonR) / ringWidth;
+      float ringGlow = exp(-diff * diff);
+      vec3 ring = diskRamp(0.02) * ringGlow * 1.9;
+
+      return accumColor + (1.0 - accumAlpha) * (bg + ring);
+  }
+
+  void main() {
+      vec2 uv = (gl_FragCoord.xy / iResolution.xy - 0.5) * 2.0;
+      uv.x *= iResolution.x / iResolution.y;
+
+      float tanFov = tan(camFov * 0.5);
+      vec3 rayDir = normalize(camForward + uv.x * tanFov * camRight + uv.y * tanFov * camUp);
+
+      vec3 col = traceRay(camPos, rayDir);
+
+      col = acesFilm(col * uExposure);
+
+      // Saturación cinematográfica
+      float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      col = clamp(mix(vec3(luma), col, 1.28), 0.0, 1.0);
+
+      col = pow(col, vec3(1.0 / 2.2));
+
+      gl_FragColor = vec4(col, 1.0);
   }
 `;
 
@@ -177,298 +401,169 @@ function App() {
   const mountRef = useRef(null);
 
   useEffect(() => {
-    if (!mountRef.current) return;
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-    let camera;
-    let renderer;
-    let composer;
-    let controls;
-    let bgScene;
-    let fgScene;
-    let clipPlaneBack;
-    let clipPlaneFront;
-    let lensingPass;
-    let animationId;
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance',
+      precision: 'highp',
+    });
+
+    // HD total con pixelRatio nítido 1:1 o hasta 1.5 en pantallas de alta densidad
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+
+    const mount = mountRef.current;
+    if (mount) {
+      mount.appendChild(renderer.domElement);
+    }
+
+    const uniforms = {
+      iResolution:   { value: new THREE.Vector2() },
+      iTime:         { value: 0 },
+      camPos:        { value: new THREE.Vector3() },
+      camRight:      { value: new THREE.Vector3() },
+      camUp:         { value: new THREE.Vector3() },
+      camForward:    { value: new THREE.Vector3() },
+      camFov:        { value: THREE.MathUtils.degToRad(42.0) },
+      uRs:           { value: 1.0 },   // Radio de Schwarzschild
+      uDiskInner:    { value: 2.2 },   // ISCO
+      uDiskOuter:    { value: 19.5 },  // Disco exterior amplio
+      uDiskRotSpeed: { value: 2.6 },   // Velocidad de rotación del disco
+      uDiskSpin:     { value: 1.0 },
+      uExposure:     { value: 1.5 },
+      uAxisTilt:     { value: 0.0 },
+      uCameraRoll:   { value: 0.0 },
+      uTravel:       { value: new THREE.Vector3() },
+    };
+
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader,
+      fragmentShader,
+      depthWrite: false,
+      depthTest: false,
+    });
+
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+    scene.add(quad);
+
+    // Ángulo de cámara idéntico a la imagen de referencia (perspectiva panorámica)
+    let theta = 0.0;
+    let phi = 1.35;
+    let radius = 33.0;
+
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    const dom = renderer.domElement;
+
+    const onPointerDown = (e) => {
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      dom.setPointerCapture(e.pointerId);
+    };
+
+    const onPointerUp = () => {
+      dragging = false;
+    };
+
+    const onPointerCancel = () => {
+      dragging = false;
+    };
+
+    const onPointerMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      theta -= dx * 0.004;
+      phi -= dy * 0.004;
+      phi = Math.min(Math.max(phi, 0.2), Math.PI - 0.2);
+    };
+
+    const onWheel = (e) => {
+      e.preventDefault();
+      radius *= Math.exp(e.deltaY * 0.0015);
+      radius = Math.min(Math.max(radius, 10.0), 100.0);
+    };
+
+    dom.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+    window.addEventListener('pointermove', onPointerMove);
+    dom.addEventListener('wheel', onWheel, { passive: false });
+
+    function updateCamera() {
+      const camPos = uniforms.camPos.value;
+      camPos.set(
+        radius * Math.sin(phi) * Math.sin(theta),
+        radius * Math.cos(phi),
+        radius * Math.sin(phi) * Math.cos(theta)
+      );
+      const forward = uniforms.camForward.value.copy(camPos).multiplyScalar(-1).normalize();
+      const worldUp = new THREE.Vector3(0, 1, 0);
+      const right = uniforms.camRight.value.crossVectors(forward, worldUp).normalize();
+      uniforms.camUp.value.crossVectors(right, forward).normalize();
+    }
+
+    function onResize() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      renderer.setSize(w, h);
+      const pr = renderer.getPixelRatio();
+      uniforms.iResolution.value.set(w * pr, h * pr);
+    }
+
+    window.addEventListener('resize', onResize);
+    onResize();
 
     const clock = new THREE.Clock();
-    const materialsToUpdate = [];
+    const travelVelocity = new THREE.Vector3(0.55, 0.12, -0.82).normalize().multiplyScalar(5.5);
+    let lastT = 0;
+    let animationId;
 
-    const init = () => {
-      bgScene = new THREE.Scene();
-      fgScene = new THREE.Scene();
-
-      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
-      camera.position.set(0, 12, 35);
-
-      clipPlaneBack = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0.1);
-      clipPlaneFront = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0.1);
-
-      renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.2;
-      renderer.localClippingEnabled = true;
-      mountRef.current.appendChild(renderer.domElement);
-
-      composer = new EffectComposer(renderer);
-      const renderBg = new RenderPass(bgScene, camera);
-      composer.addPass(renderBg);
-
-      lensingPass = new ShaderPass(GravitationalLensingShader);
-      composer.addPass(lensingPass);
-
-      const renderFg = new RenderPass(fgScene, camera);
-      renderFg.clear = false;
-      renderFg.clearDepth = true;
-      composer.addPass(renderFg);
-
-      const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.5, 0.2);
-      composer.addPass(bloomPass);
-
-      controls = new OrbitControls(camera, renderer.domElement);
-      controls.enableDamping = true;
-      controls.dampingFactor = 0.04;
-      controls.maxDistance = 150;
-      controls.minDistance = 10;
-      controls.enablePan = false;
-      controls.target.set(0, 0, 0);
-      controls.autoRotate = true;
-      controls.autoRotateSpeed = -0.2;
-
-      buildBlackHole();
-      buildAccretionDisk();
-      buildStars();
-
-      const loadingElement = document.getElementById('loading');
-      if (loadingElement) {
-        loadingElement.style.opacity = '0';
-        setTimeout(() => {
-          if (loadingElement) loadingElement.style.display = 'none';
-        }, 1500);
-      }
-    };
-
-    const buildAccretionDisk = () => {
-      const diskGeometry = new THREE.RingGeometry(6.45, 33, 128, 64);
-      diskGeometry.rotateX(-Math.PI / 2);
-
-      const diskVertexShader = `
-        #include <clipping_planes_pars_vertex>
-        varying vec2 vUv;
-        varying vec3 vPos;
-        void main() {
-            vUv = uv;
-            vPos = position;
-            #include <begin_vertex>
-            #include <project_vertex>
-            #include <clipping_planes_vertex>
-        }
-    `;
-
-      const diskFragmentShader = `
-        #include <clipping_planes_pars_fragment>
-
-        uniform float uTime;
-        uniform float uBeamDir;
-        varying vec2 vUv;
-        varying vec3 vPos;
-
-        ${noiseShader}
-
-        void main() {
-            #include <clipping_planes_fragment>
-            float dist = length(vPos.xz);
-            float normalizedDist = (dist - 6.45) / (33.0 - 6.45);
-            float angle = atan(vPos.z, vPos.x);
-            float speed = 12.0 / (dist * 0.6);
-            float rotatingAngle = angle + uTime * speed;
-
-            vec3 noiseCoord = vec3(cos(rotatingAngle) * dist, 0.0, sin(rotatingAngle) * dist);
-            float n1 = snoise(noiseCoord * 0.5 - vec3(0, uTime * 0.5, 0));
-            float n2 = snoise(noiseCoord * 2.0 + vec3(uTime * 0.2, 0, 0));
-            float totalNoise = (n1 * 0.6 + n2 * 0.4) * 0.5 + 0.5;
-
-            float rings = sin(dist * 15.0) * 0.5 + 0.5;
-            totalNoise = mix(totalNoise, rings, 0.15);
-
-            float radialFalloff = exp(-3.8 * normalizedDist);
-            float innerEdge = smoothstep(0.0, 0.04, normalizedDist);
-            float outerTail = smoothstep(1.0, 0.4, normalizedDist);
-            float brightness = radialFalloff * innerEdge * outerTail;
-            brightness *= (0.3 + 0.7 * totalNoise);
-
-            vec3 colorInner = vec3(1.0, 0.95, 0.8);
-            vec3 colorMid = vec3(1.0, 0.35, 0.02);
-            vec3 colorOuter = vec3(0.2, 0.02, 0.0);
-
-            vec3 color = mix(colorMid, colorInner, smoothstep(0.25, 0.0, normalizedDist));
-            color = mix(colorOuter, color, smoothstep(0.85, 0.1, normalizedDist));
-
-            float beaming = 0.5 + 0.5 * cos(angle - uBeamDir);
-            vec3 beamShift = mix(vec3(1.0, 0.6, 0.4), vec3(0.9, 0.95, 1.0), beaming);
-            float beamFactor = mix(0.1, 2.5, pow(beaming, 2.0));
-            color *= beamFactor * beamShift;
-
-            float finalAlpha = clamp(brightness * 2.0, 0.0, 1.0);
-            gl_FragColor = vec4(color * brightness * 2.0, finalAlpha);
-        }
-    `;
-
-      const diskUniforms = {
-        uTime: { value: 0 },
-        uBeamDir: { value: BEAM_DIR },
-      };
-
-      const matBack = new THREE.ShaderMaterial({
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-        clippingPlanes: [clipPlaneBack],
-        uniforms: diskUniforms,
-        vertexShader: diskVertexShader,
-        fragmentShader: diskFragmentShader,
-      });
-      const diskBack = new THREE.Mesh(diskGeometry, matBack);
-      diskBack.rotation.z = 0.15;
-      diskBack.rotation.x = 0.08;
-      bgScene.add(diskBack);
-      materialsToUpdate.push(matBack);
-
-      const matFront = new THREE.ShaderMaterial({
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-        clippingPlanes: [clipPlaneFront],
-        uniforms: diskUniforms,
-        vertexShader: diskVertexShader,
-        fragmentShader: diskFragmentShader,
-      });
-      const diskFront = new THREE.Mesh(diskGeometry, matFront);
-      diskFront.rotation.copy(diskBack.rotation);
-      fgScene.add(diskFront);
-      materialsToUpdate.push(matFront);
-    };
-
-    const buildBlackHole = () => {
-      const bhGeometry = new THREE.SphereGeometry(EVENT_HORIZON, 64, 64);
-      const bhMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
-      const blackHole = new THREE.Mesh(bhGeometry, bhMaterial);
-      fgScene.add(blackHole);
-
-      const photonGeo = new THREE.SphereGeometry(EVENT_HORIZON + 0.08, 64, 64);
-      const photonMat = new THREE.ShaderMaterial({
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        vertexShader: `
-            varying vec3 vNormal;
-            varying vec3 vViewPosition;
-            void main() {
-                vNormal = normalize(normalMatrix * normal);
-                vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-                vViewPosition = -mvPos.xyz;
-                gl_Position = projectionMatrix * mvPos;
-            }
-        `,
-        fragmentShader: `
-            varying vec3 vNormal;
-            varying vec3 vViewPosition;
-            void main() {
-                vec3 normal = normalize(vNormal);
-                vec3 viewDir = normalize(vViewPosition);
-                float fresnel = dot(viewDir, normal);
-                fresnel = smoothstep(0.0, 0.15, fresnel) * smoothstep(0.4, 0.15, fresnel);
-                gl_FragColor = vec4(vec3(1.0, 0.8, 0.6) * fresnel * 3.0, fresnel);
-            }
-        `,
-      });
-      const photonRing = new THREE.Mesh(photonGeo, photonMat);
-      fgScene.add(photonRing);
-    };
-
-    const buildStars = () => {
-      const starsGeo = new THREE.BufferGeometry();
-      const count = 15000;
-      const pos = new Float32Array(count * 3);
-      for (let i = 0; i < count * 3; i += 3) {
-        const r = 600 + Math.random() * 800;
-        const theta = Math.random() * Math.PI * 2;
-        const phi = Math.acos(2 * Math.random() - 1);
-        pos[i] = r * Math.sin(phi) * Math.cos(theta);
-        pos[i + 1] = r * Math.sin(phi) * Math.sin(theta);
-        pos[i + 2] = r * Math.cos(phi);
-      }
-      starsGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      const starsMat = new THREE.PointsMaterial({
-        color: 0xffffff,
-        size: 0.9,
-        transparent: true,
-        opacity: 0.8,
-        depthWrite: false,
-      });
-      const stars = new THREE.Points(starsGeo, starsMat);
-      bgScene.add(stars);
-    };
-
-    const onWindowResize = () => {
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      composer.setSize(window.innerWidth, window.innerHeight);
-      lensingPass.uniforms.uAspect.value = window.innerWidth / window.innerHeight;
-    };
-
-    const animate = () => {
+    function animate() {
       animationId = requestAnimationFrame(animate);
-      const elapsedTime = clock.getElapsedTime();
-      materialsToUpdate.forEach((mat) => {
-        if (mat.uniforms && mat.uniforms.uTime) {
-          mat.uniforms.uTime.value = elapsedTime;
-        }
-      });
+      const t = clock.getElapsedTime();
+      const dtFrame = Math.min(t - lastT, 0.1);
+      lastT = t;
+      uniforms.iTime.value = t;
 
-      const cameraDir = new THREE.Vector3();
-      camera.getWorldDirection(cameraDir);
-      clipPlaneBack.normal.copy(cameraDir);
-      clipPlaneFront.normal.copy(cameraDir).negate();
+      uniforms.uTravel.value.addScaledVector(travelVelocity, dtFrame);
+      uniforms.uAxisTilt.value = 0.05 * Math.sin(t * 0.35);
 
-      const dist = camera.position.length();
-      const screenMass = 6.4 / dist;
-      lensingPass.uniforms.uMass.value = screenMass;
-
-      controls.update();
-      composer.render();
-    };
-
-    init();
+      updateCamera();
+      renderer.render(scene, camera);
+    }
     animate();
-    window.addEventListener('resize', onWindowResize);
 
     return () => {
       cancelAnimationFrame(animationId);
-      window.removeEventListener('resize', onWindowResize);
-      if (mountRef.current && renderer) {
-        mountRef.current.removeChild(renderer.domElement);
+      window.removeEventListener('resize', onResize);
+      dom.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      window.removeEventListener('pointermove', onPointerMove);
+      dom.removeEventListener('wheel', onWheel);
+
+      if (mount && renderer.domElement && mount.contains(renderer.domElement)) {
+        mount.removeChild(renderer.domElement);
       }
-      renderer?.dispose();
-      composer?.dispose();
-      controls?.dispose();
+
+      material.dispose();
+      quad.geometry.dispose();
+      renderer.dispose();
     };
   }, []);
 
   return (
     <>
       <style>{globalStyles}</style>
-      <div className="app-shell">
-        <div id="loading" className="loading">
-          <div className="spinner" />
-          CALCULANDO MÉTRICA DE SCHWARZSCHILD...
-        </div>
-        <div ref={mountRef} className="scene-root" />
-      </div>
+      <div ref={mountRef} className="canvas-container" />
     </>
   );
 }
